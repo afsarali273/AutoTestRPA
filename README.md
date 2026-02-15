@@ -4,7 +4,7 @@ Unified automation stack for web, API, and device testing with:
 - CLI runners (`Playwright`, `REST/SOAP`, `Appium`)
 - Reusable function library (`useFunction` across channels)
 - Control Center backend API for run orchestration
-- Control Center UI for suite management, execution, logs, and MCP planning
+- Control Center UI for suite management, suite DSL editing, function registry editing, execution logs, and MCP planning/generation
 
 ## Architecture docs
 - Product roadmap: `docs/master-plan.md`
@@ -25,6 +25,7 @@ Unified automation stack for web, API, and device testing with:
 - API suite: `examples/api/rest-soap.yaml`
 - Device suite: `examples/device/basic-android.yaml`
 - Reusable functions: `examples/functions/reusable.yaml`
+- MCP generated suites: `examples/generated/*.yaml`
 
 ## Quick start
 1. Install dependencies
@@ -71,7 +72,11 @@ pnpm dev:ui
 - `GET /api/health`
 - `GET /api/suites`
 - `POST /api/suites`
+- `GET /api/suite-content` (query: `suiteId` or `channel` + `specPath`)
+- `PUT /api/suite-content`
 - `GET /api/functions`
+- `GET /api/functions/content`
+- `PUT /api/functions/content`
 - `POST /api/runs`
 - `GET /api/runs`
 - `GET /api/runs/:id`
@@ -79,3 +84,4 @@ pnpm dev:ui
 - `GET /api/runs/:id/report`
 - `POST /api/runs/:id/cancel`
 - `POST /api/mcp/plan`
+- `POST /api/mcp/generate`

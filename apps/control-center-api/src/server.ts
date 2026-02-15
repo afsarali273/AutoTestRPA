@@ -10,6 +10,7 @@ import YAML from "yaml";
 
 type Channel = "web" | "api" | "device";
 type RunStatus = "queued" | "running" | "passed" | "failed" | "canceled";
+type SpecFormat = "yaml" | "json";
 
 interface SuiteInfo {
   id: string;
@@ -46,10 +47,19 @@ interface IntentPlan {
   nextStep: string;
 }
 
+interface GeneratedSuite {
+  channel: Channel;
+  suiteName: string;
+  specPath: string;
+  content: string;
+}
+
 const PORT = Number(process.env.UAP_API_PORT || 8787);
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const EXAMPLES_DIR = resolve(ROOT_DIR, "examples");
 const REPORTS_DIR = resolve(ROOT_DIR, "reports");
+const FUNCTIONS_FILE = resolve(EXAMPLES_DIR, "functions", "reusable.yaml");
+const GENERATED_DIR = resolve(EXAMPLES_DIR, "generated");
 
 const CHANNEL_EXAMPLE_DIR: Record<Channel, string> = {
   web: "web",
@@ -70,7 +80,7 @@ let sequence = 1;
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "control-center-api", now: new Date().toISOString() });
@@ -134,17 +144,112 @@ app.post("/api/suites", async (req, res) => {
   }
 });
 
-app.get("/api/functions", async (_req, res) => {
+app.get("/api/suite-content", async (req, res) => {
   try {
-    const functionsFile = resolve(EXAMPLES_DIR, "functions", "reusable.yaml");
-    if (!existsSync(functionsFile)) {
-      res.json({ functions: [], source: relative(ROOT_DIR, functionsFile) });
+    const suite = await resolveSuiteFromBody({
+      suiteId: toString(req.query.suiteId),
+      channel: toChannel(req.query.channel),
+      specPath: toString(req.query.specPath),
+    });
+
+    if (!suite) {
+      res.status(400).json({ error: "Provide suiteId or { channel, specPath }" });
       return;
     }
 
-    const parsed = YAML.parse(await readFile(functionsFile, "utf-8")) as { functions?: unknown[] } | unknown[];
+    const fullPath = resolve(ROOT_DIR, suite.specPath);
+    const content = await readFile(fullPath, "utf-8");
+    const format = detectFormat(suite.specPath);
+
+    res.json({ suite, content, format });
+  } catch (error) {
+    res.status(500).json({ error: toErrorMessage(error) });
+  }
+});
+
+app.put("/api/suite-content", async (req, res) => {
+  try {
+    const body = req.body as {
+      suiteId?: string;
+      channel?: Channel;
+      specPath?: string;
+      content?: string;
+    };
+
+    if (typeof body.content !== "string") {
+      res.status(400).json({ error: "content is required" });
+      return;
+    }
+
+    const suite = await resolveSuiteFromBody(body);
+    if (!suite) {
+      res.status(400).json({ error: "Provide suiteId or { channel, specPath }" });
+      return;
+    }
+
+    const format = detectFormat(suite.specPath);
+    assertContentParses(body.content, format);
+
+    const fullPath = resolve(ROOT_DIR, suite.specPath);
+    await writeFile(fullPath, body.content, "utf-8");
+
+    const parsedName = extractSuiteName(body.content, format);
+    if (parsedName) {
+      suite.name = parsedName;
+      suite.id = `${suite.channel}:${suite.specPath}`;
+    }
+
+    res.json({ suite, saved: true });
+  } catch (error) {
+    res.status(500).json({ error: toErrorMessage(error) });
+  }
+});
+
+app.get("/api/functions", async (_req, res) => {
+  try {
+    const { functions, source } = await loadFunctionsFromFile();
+    res.json({ functions, source });
+  } catch (error) {
+    res.status(500).json({ error: toErrorMessage(error) });
+  }
+});
+
+app.get("/api/functions/content", async (_req, res) => {
+  try {
+    await ensureFunctionsFile();
+    const content = await readFile(FUNCTIONS_FILE, "utf-8");
+    const parsed = YAML.parse(content) as { functions?: unknown[] } | unknown[];
     const functions = Array.isArray(parsed) ? parsed : parsed.functions || [];
-    res.json({ functions, source: relative(ROOT_DIR, functionsFile) });
+
+    res.json({
+      source: relative(ROOT_DIR, FUNCTIONS_FILE),
+      content,
+      functions,
+    });
+  } catch (error) {
+    res.status(500).json({ error: toErrorMessage(error) });
+  }
+});
+
+app.put("/api/functions/content", async (req, res) => {
+  try {
+    const body = req.body as { content?: string };
+    if (typeof body.content !== "string") {
+      res.status(400).json({ error: "content is required" });
+      return;
+    }
+
+    const parsed = YAML.parse(body.content) as { functions?: unknown[] } | unknown[];
+    const functions = Array.isArray(parsed) ? parsed : parsed.functions;
+    if (!Array.isArray(functions)) {
+      res.status(400).json({ error: "functions content must include a functions array" });
+      return;
+    }
+
+    await ensureFunctionsFile();
+    await writeFile(FUNCTIONS_FILE, body.content, "utf-8");
+
+    res.json({ source: relative(ROOT_DIR, FUNCTIONS_FILE), count: functions.length, saved: true });
   } catch (error) {
     res.status(500).json({ error: toErrorMessage(error) });
   }
@@ -161,7 +266,7 @@ app.post("/api/runs", async (req, res) => {
       headless?: boolean;
     };
 
-    const suite = await resolveSuiteForRun(body);
+    const suite = await resolveSuiteFromBody(body);
     if (!suite) {
       res.status(400).json({ error: "Provide a valid suiteId or { channel, specPath }" });
       return;
@@ -305,6 +410,35 @@ app.post("/api/mcp/plan", async (req, res) => {
   }
 });
 
+app.post("/api/mcp/generate", async (req, res) => {
+  try {
+    const body = req.body as {
+      intent?: string;
+      channels?: Channel[];
+      save?: boolean;
+    };
+
+    if (!body.intent || typeof body.intent !== "string") {
+      res.status(400).json({ error: "intent is required" });
+      return;
+    }
+
+    const inferredChannels: Channel[] = body.channels?.length
+      ? body.channels.filter((channel): channel is Channel => isChannel(channel))
+      : classifyChannels(body.intent);
+    const channels: Channel[] = inferredChannels.length > 0 ? inferredChannels : ["web"];
+    const save = body.save !== false;
+
+    const generated = await generateSuitesFromIntent(body.intent, channels, save);
+    const suites = await discoverSuites();
+    const plan = buildPlan(body.intent, suites);
+
+    res.json({ generated, plan });
+  } catch (error) {
+    res.status(500).json({ error: toErrorMessage(error) });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Control Center API listening on http://localhost:${PORT}`);
   console.log(`Workspace root: ${ROOT_DIR}`);
@@ -400,7 +534,7 @@ async function readSuiteName(filePath: string): Promise<string> {
   }
 }
 
-async function resolveSuiteForRun(body: {
+async function resolveSuiteFromBody(body: {
   suiteId?: string;
   channel?: Channel;
   specPath?: string;
@@ -432,52 +566,111 @@ async function resolveSuiteForRun(body: {
   return null;
 }
 
-function appendChunk(record: RunRecord, text: string): void {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => line.length > 0);
+async function loadFunctionsFromFile(): Promise<{ functions: unknown[]; source: string }> {
+  await ensureFunctionsFile();
+  const parsed = YAML.parse(await readFile(FUNCTIONS_FILE, "utf-8")) as { functions?: unknown[] } | unknown[];
+  const functions = Array.isArray(parsed) ? parsed : parsed.functions || [];
 
-  for (const line of lines) {
-    appendLog(record, line);
-  }
+  return {
+    functions,
+    source: relative(ROOT_DIR, FUNCTIONS_FILE),
+  };
 }
 
-function appendLog(record: RunRecord, line: string): void {
-  record.logs.push(line);
-  if (record.logs.length > 2000) {
-    record.logs.splice(0, record.logs.length - 2000);
+async function ensureFunctionsFile(): Promise<void> {
+  if (existsSync(FUNCTIONS_FILE)) {
+    return;
   }
+
+  await mkdir(dirname(FUNCTIONS_FILE), { recursive: true });
+  await writeFile(FUNCTIONS_FILE, YAML.stringify({ functions: [] }), "utf-8");
 }
 
-function buildSuiteTemplate(channel: Channel, suiteName: string): string {
+async function generateSuitesFromIntent(intent: string, channels: Channel[], save: boolean): Promise<GeneratedSuite[]> {
+  const slug = sanitizeFilename(intent).slice(0, 48) || "generated";
+  const stamp = timestampToken();
+  const url = extractFirstUrl(intent);
+  const generated: GeneratedSuite[] = [];
+
+  if (save) {
+    await mkdir(GENERATED_DIR, { recursive: true });
+  }
+
+  for (const channel of channels) {
+    const suiteName = `${slug}-${channel}-${stamp}`;
+    const fileName = `${suiteName}.yaml`;
+    const specPath = relative(ROOT_DIR, resolve(GENERATED_DIR, fileName));
+    const content = buildGeneratedSuiteTemplate(channel, suiteName, intent, url);
+
+    if (save) {
+      await writeFile(resolve(ROOT_DIR, specPath), content, "utf-8");
+    }
+
+    generated.push({
+      channel,
+      suiteName,
+      specPath,
+      content,
+    });
+  }
+
+  return generated;
+}
+
+function buildGeneratedSuiteTemplate(channel: Channel, suiteName: string, intent: string, url?: string): string {
   if (channel === "web") {
+    const baseUrl = url || "{{env.BASE_URL}}";
     return `suiteName: ${suiteName}
-baseUrl: https://example.com
+baseUrl: '${baseUrl}'
+headless: true
+functionsFile: examples/functions/reusable.yaml
 tests:
-  - name: open-home
+  - name: generated-web-smoke
     steps:
       - type: goto
         url: /
-      - type: assertVisible
-        selector: h1
+      - type: waitFor
+        selector: body
+      - type: screenshot
+        value: artifacts/${suiteName}.png
 `;
   }
 
   if (channel === "api") {
+    const endpoint = url || "{{env.API_BASE_URL}}/health";
+    const wantsSoap = includesAny(intent.toLowerCase(), ["soap", "wsdl", "envelope"]);
+
+    if (wantsSoap) {
+      return `suiteName: ${suiteName}
+requests:
+  - kind: soap
+    name: generated-soap-request
+    url: '${endpoint}'
+    soapAction: GeneratedAction
+    body: |
+      <soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">
+        <soapenv:Body>
+          <GeneratedAction xmlns=\"urn:example\"/>
+        </soapenv:Body>
+      </soapenv:Envelope>
+    assertions:
+      status: 200
+`;
+    }
+
     return `suiteName: ${suiteName}
 requests:
-  - name: health
-    kind: rest
+  - kind: rest
+    name: generated-rest-request
     method: GET
-    url: https://httpbin.org/status/200
+    url: '${endpoint}'
     assertions:
       status: 200
 `;
   }
 
   return `suiteName: ${suiteName}
-appiumServerUrl: http://127.0.0.1:4723
+appiumServerUrl: '{{env.APPIUM_URL}}'
 capabilities:
   platformName: Android
   appium:automationName: UiAutomator2
@@ -550,12 +743,109 @@ function buildPlan(intent: string, suites: SuiteInfo[]): IntentPlan {
   };
 }
 
+function classifyChannels(intent: string): Channel[] {
+  const normalized = intent.toLowerCase();
+  const channels: Channel[] = [];
+
+  if (includesAny(normalized, ["web", "ui", "browser", "playwright", "frontend"])) {
+    channels.push("web");
+  }
+
+  if (includesAny(normalized, ["api", "rest", "soap", "service", "endpoint"])) {
+    channels.push("api");
+  }
+
+  if (includesAny(normalized, ["mobile", "appium", "android", "ios", "desktop", "device"])) {
+    channels.push("device");
+  }
+
+  return dedupe<Channel>(channels);
+}
+
 function pickSuite(suites: SuiteInfo[], channel: Channel): SuiteInfo | undefined {
   return suites.find((suite) => suite.channel === channel);
 }
 
-function includesAny(text: string, keywords: string[]): boolean {
-  return keywords.some((keyword) => text.includes(keyword));
+function appendChunk(record: RunRecord, text: string): void {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+
+  for (const line of lines) {
+    appendLog(record, line);
+  }
+}
+
+function appendLog(record: RunRecord, line: string): void {
+  record.logs.push(line);
+  if (record.logs.length > 2000) {
+    record.logs.splice(0, record.logs.length - 2000);
+  }
+}
+
+function buildSuiteTemplate(channel: Channel, suiteName: string): string {
+  if (channel === "web") {
+    return `suiteName: ${suiteName}
+baseUrl: https://example.com
+tests:
+  - name: open-home
+    steps:
+      - type: goto
+        url: /
+      - type: assertVisible
+        selector: h1
+`;
+  }
+
+  if (channel === "api") {
+    return `suiteName: ${suiteName}
+requests:
+  - name: health
+    kind: rest
+    method: GET
+    url: https://httpbin.org/status/200
+    assertions:
+      status: 200
+`;
+  }
+
+  return `suiteName: ${suiteName}
+appiumServerUrl: http://127.0.0.1:4723
+capabilities:
+  platformName: Android
+  appium:automationName: UiAutomator2
+  appium:deviceName: emulator-5554
+steps:
+  - type: wait
+    timeoutMs: 1000
+`;
+}
+
+function detectFormat(filePath: string): SpecFormat {
+  return extname(filePath).toLowerCase() === ".json" ? "json" : "yaml";
+}
+
+function assertContentParses(content: string, format: SpecFormat): void {
+  if (format === "json") {
+    JSON.parse(content);
+    return;
+  }
+
+  YAML.parse(content);
+}
+
+function extractSuiteName(content: string, format: SpecFormat): string | null {
+  try {
+    const parsed = format === "json" ? JSON.parse(content) : YAML.parse(content);
+    if (parsed && typeof parsed.suiteName === "string" && parsed.suiteName.trim()) {
+      return parsed.suiteName.trim();
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function nextRunId(): string {
@@ -564,12 +854,24 @@ function nextRunId(): string {
   return id;
 }
 
+function timestampToken(): string {
+  return new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
+}
+
 function escapeArg(value: string): string {
   return value.includes(" ") ? `'${value.replace(/'/g, "'\\''")}'` : value;
 }
 
 function isChannel(value: string): value is Channel {
   return value === "web" || value === "api" || value === "device";
+}
+
+function toChannel(value: unknown): Channel | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  return isChannel(value) ? value : undefined;
 }
 
 function sanitizeFilename(value: string): string {
@@ -597,6 +899,23 @@ function toAbsolutePath(filePath: string): string {
   }
 
   return resolve(ROOT_DIR, filePath);
+}
+
+function toString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function extractFirstUrl(input: string): string | undefined {
+  const match = input.match(/https?:\/\/[^\s)]+/i);
+  return match ? match[0] : undefined;
+}
+
+function includesAny(text: string, keywords: string[]): boolean {
+  return keywords.some((keyword) => text.includes(keyword));
+}
+
+function dedupe<T>(items: T[]): T[] {
+  return [...new Set(items)];
 }
 
 function toErrorMessage(error: unknown): string {

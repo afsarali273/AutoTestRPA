@@ -12,6 +12,6 @@ tests:
         functionName: open_and_check_heading
         functionArgs:
           path: /
-          heading: '{{var.headingText}}'
+          heading: "{{var.headingText}}"
       - type: screenshot
         value: artifacts/example-home.png
