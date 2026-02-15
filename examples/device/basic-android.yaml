@@ -1,0 +1,25 @@
+suiteName: android-login-smoke
+appiumServerUrl: http://127.0.0.1:4723
+functionsFile: examples/functions/reusable.yaml
+capabilities:
+  platformName: Android
+  appium:automationName: UiAutomator2
+  appium:deviceName: emulator-5554
+  appium:appPackage: com.example.app
+  appium:appActivity: com.example.app.MainActivity
+steps:
+  - type: useFunction
+    functionName: wait_and_tap
+    functionArgs:
+      locatorType: accessibility id
+      locatorValue: Login
+  - type: type
+    selector:
+      using: id
+      value: com.example.app:id/username
+    text: qa-user
+  - type: assertText
+    selector:
+      using: id
+      value: com.example.app:id/title
+    text: Welcome

@@ -1,0 +1,25 @@
+suiteName: api-mixed-smoke
+functionsFile: examples/functions/reusable.yaml
+variables:
+  healthUrl: https://httpbin.org/status/200
+requests:
+  - kind: useFunction
+    functionName: rest_status_check
+    functionArgs:
+      url: '{{var.healthUrl}}'
+      expectedStatus: 200
+  - kind: soap
+    name: soap-currency-sample
+    url: https://www.dataaccess.com/webservicesserver/numberconversion.wso
+    soapAction: NumberToWords
+    body: |
+      <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:web="http://www.dataaccess.com/webservicesserver/">
+        <soapenv:Body>
+          <web:NumberToWords>
+            <web:ubiNum>125</web:ubiNum>
+          </web:NumberToWords>
+        </soapenv:Body>
+      </soapenv:Envelope>
+    assertions:
+      status: 200
+      bodyContains: one hundred and twenty five

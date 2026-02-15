@@ -1,0 +1,52 @@
+functions:
+  - name: open_and_check_heading
+    version: v1
+    channel: web
+    description: Open a page and verify heading text exists.
+    params:
+      - name: path
+        required: true
+      - name: heading
+        required: true
+    steps:
+      - type: goto
+        url: '{{arg.path}}'
+      - type: assertVisible
+        selector: h1
+      - type: assertText
+        selector: h1
+        value: '{{arg.heading}}'
+
+  - name: rest_status_check
+    version: v1
+    channel: api
+    description: Check an endpoint returns expected status.
+    params:
+      - name: url
+        required: true
+      - name: expectedStatus
+        required: true
+    steps:
+      - kind: rest
+        name: health-check
+        method: GET
+        url: '{{arg.url}}'
+        assertions:
+          status: '{{arg.expectedStatus}}'
+
+  - name: wait_and_tap
+    version: v1
+    channel: device
+    description: Wait for app stabilization then tap an element.
+    params:
+      - name: locatorType
+        required: true
+      - name: locatorValue
+        required: true
+    steps:
+      - type: wait
+        timeoutMs: 1200
+      - type: tap
+        selector:
+          using: '{{arg.locatorType}}'
+          value: '{{arg.locatorValue}}'

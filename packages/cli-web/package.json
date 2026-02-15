@@ -1,0 +1,20 @@
+{
+  "name": "@uap/cli-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "uap-web": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@uap/cli-shared": "workspace:*",
+    "@uap/contracts": "workspace:*",
+    "commander": "^13.1.0",
+    "playwright": "^1.51.1"
+  }
+}

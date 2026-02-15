@@ -1,0 +1,17 @@
+{
+  "name": "@uap/mcp-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "uap-orchestrator": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^13.1.0"
+  }
+}

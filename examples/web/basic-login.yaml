@@ -1,0 +1,17 @@
+suiteName: web-login-smoke
+baseUrl: https://example.com
+headless: true
+functionsFile: examples/functions/reusable.yaml
+variables:
+  headingText: Example Domain
+tests:
+  - name: open-home-and-check-heading
+    tags: [smoke, web]
+    steps:
+      - type: useFunction
+        functionName: open_and_check_heading
+        functionArgs:
+          path: /
+          heading: '{{var.headingText}}'
+      - type: screenshot
+        value: artifacts/example-home.png
